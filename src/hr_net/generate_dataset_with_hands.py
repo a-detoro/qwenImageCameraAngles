@@ -383,15 +383,20 @@ def collect_csv_image_pairs(csv_root, img_root, split):
         if not csv_view_path.exists():
             continue
         for csv_file in csv_view_path.glob('*_rgb.csv'):
-            img_name = csv_file.stem + '.png'
-            img_file = img_view_path / img_name
-            if img_file.exists():
-                pairs.append({
-                    'csv_path': csv_file,
-                    'img_path': img_file,
-                    'basename': csv_file.stem,
-                    'split': split
-                })
+            img_file = None
+            for ext in ['.png', '.jpg', '.jpeg']:
+                candidate = img_view_path / (csv_file.stem + ext)
+                if candidate.exists():
+                    img_file = candidate
+                    break
+            if img_file is None:
+                continue
+            pairs.append({
+                'csv_path': csv_file,
+                'img_path': img_file,
+                'basename': csv_file.stem,
+                'split': split
+            })
     return pairs
 
 

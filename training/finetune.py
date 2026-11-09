@@ -68,6 +68,7 @@ def parse_args():
     parser.add_argument("--inference_every",   type=int,   default=2)
     parser.add_argument("--inference_steps",   type=int,   default=4)
     parser.add_argument("--inference_samples", type=int,   default=5)
+    parser.add_argument("--patience", type=int, default=5)
     return parser.parse_args()
 
 
@@ -91,6 +92,7 @@ def make_config(args, experiment_json: str, stage_output_dir: str) -> TrainingCo
         inference_every=args.inference_every,
         inference_steps=args.inference_steps,
         inference_samples=args.inference_samples,
+        patience=args.patience
     )
 
 
@@ -134,13 +136,14 @@ def load_checkpoint(model, config, device, optimizer=None, diff_scheduler=None):
     checkpoint_path = os.path.join(config.output_dir, "qwen_lora_best.pt")
     if not os.path.exists(checkpoint_path):
         logger.info("No se encontró checkpoint previo. Iniciando desde cero.")
-        return 0, float('inf')
+        return 0, float('inf'), 0
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if isinstance(ckpt, dict) and "lora_state_dict" in ckpt:
             lora_state  = ckpt["lora_state_dict"]
             start_epoch = ckpt.get("epoch", -1) + 1
             best_loss   = ckpt.get("best_loss", float('inf'))
+            patience_counter = ckpt.get("patience_counter", 0)
             if optimizer is not None and "optimizer_state_dict" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 logger.info("✓ Estado del optimizador restaurado")
@@ -149,17 +152,17 @@ def load_checkpoint(model, config, device, optimizer=None, diff_scheduler=None):
                 logger.info("✓ Estado del scheduler restaurado")
             logger.info(f"✓ Reanudando desde época local {start_epoch} | best_loss={best_loss:.6f}")
         else:
-            lora_state, start_epoch, best_loss = ckpt, 0, float('inf')
+            lora_state, start_epoch, best_loss, patience_counter  = ckpt, 0, float('inf'), 0
             logger.warning("Checkpoint en formato antiguo. Reanudando desde época 0.")
         missing, unexpected = model.load_state_dict(lora_state, strict=False)
         logger.info(f"{len(lora_state)-len(unexpected)}/{len(lora_state)} pesos LoRA cargados")
-        return start_epoch, best_loss
+        return start_epoch, best_loss, patience_counter
     except Exception as e:
         logger.error(f"Error cargando checkpoint: {e}. Iniciando desde cero.")
-        return 0, float('inf')
+        return 0, float('inf'), 0
 
 
-def save_checkpoint(model, config, global_epoch, local_epoch, best_loss, optimizer, diff_scheduler, extra_name=None):
+def save_checkpoint(model, config, global_epoch, local_epoch, best_loss, optimizer, diff_scheduler, patience_counter=0, extra_name=None):
     local_lora = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
     ckpt_data  = {
         "lora_state_dict":      local_lora,
@@ -169,6 +172,7 @@ def save_checkpoint(model, config, global_epoch, local_epoch, best_loss, optimiz
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": diff_scheduler.state_dict() if hasattr(diff_scheduler, 'state_dict') else None,
         "learning_rate":        config.lr,
+        "patience_counter":     patience_counter,
     }
     save_path = os.path.join(config.output_dir, "qwen_lora_best.pt")
     torch.save(ckpt_data, save_path)
@@ -195,6 +199,7 @@ def train_stage(
     optimizer: torch.optim.Optimizer,
     diff_scheduler,
     epoch_offset: int,
+    patience: int = 5,
 ):
     exp_name = os.path.splitext(os.path.basename(config.experiment_json))[0]
     logger.info(f"\n{'='*60}")
@@ -210,7 +215,7 @@ def train_stage(
     # desde el checkpoint de este stage_dir (si existe).
     # El optimizer y scheduler son los mismos objetos pasados desde main(),
     # así que su estado se sobreescribe con el del checkpoint si lo hay.
-    start_local_epoch, best_loss = load_checkpoint(model, config, device, optimizer, diff_scheduler)
+    start_local_epoch, best_loss, patience_counter = load_checkpoint(model, config, device, optimizer, diff_scheduler)
 
     train_dataset, val_dataset, test_dataset, \
     train_dataloader, val_dataloader, test_dataloader = build_dataloaders(config)
@@ -350,9 +355,13 @@ def train_stage(
             best_loss = val_loss
             logger.info("🟢 Nueva mejor val_loss. Guardando checkpoint...")
             save_checkpoint(model, config, global_epoch, local_epoch, best_loss,
-                            optimizer, diff_scheduler, extra_name=exp_name)
+                            optimizer, diff_scheduler, patience_counter, extra_name=exp_name)
         else:
+            patience_counter += 1
             logger.info("⚪ Val_loss no mejoró.")
+            if patience_counter >= config.patience:
+                logger.info(f"🔴 Early stopping en epoch global {global_epoch}.")
+                break
 
         if config.inference_every > 0 and (global_epoch + 1) % config.inference_every == 0:
             run_inference_callback(
@@ -374,6 +383,7 @@ def train_stage(
             "epoch":                local_epoch,
             "global_epoch":         global_epoch,
             "best_loss":            best_loss,
+            "patience_counter":     patience_counter,
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": diff_scheduler.state_dict() if hasattr(diff_scheduler, 'state_dict') else None,
             "learning_rate":        config.lr,
@@ -473,6 +483,7 @@ def main():
             optimizer=optimizer,
             diff_scheduler=diff_scheduler,
             epoch_offset=epoch_offset,
+            patience=stage_config.patience,
         )
 
         epoch_offset += stage_config.epochs

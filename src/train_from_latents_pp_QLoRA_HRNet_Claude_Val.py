@@ -53,6 +53,13 @@ Usage:
         --velocity_loss_weight 0.5 \\
         --heatmap_loss_type "mse" \\
         --val_split 0.1
+
+
+
+----------------------------------------------------------------
+
+ torchrun --nproc_per_node 2 train_from_latents_pp_QLoRA_HRNet_Claude_Val.py --latents_dir "/data/antoniodetoro/qwen/dataset_local_latents_512_heatmaps/" --hrnet_model_path /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/models/hrnet_finetuned_best.pth --output_dir output_qwen_HRNet2 --batch_size 4 --microbatches 4 --epochs 20 --heatmap_loss_weight 0.5 --velocity_loss_weight 0.5 --heatmap_loss_type "mse"
+
 """
 
 import os
@@ -617,6 +624,43 @@ def preprocess_image_for_hrnet(
     return image
 
 
+def compute_pck(
+    pred_heatmaps: torch.Tensor,
+    target_heatmaps: torch.Tensor,
+    threshold: float = 0.2,
+) -> float:
+    """
+    Calcula PCK (Percentage of Correct Keypoints).
+
+    Un keypoint se considera correcto si la distancia euclídea entre la
+    posición predicha y la GT (en coordenadas de heatmap) es menor que
+    threshold * sqrt(H * W).
+
+    Args:
+        pred_heatmaps:   (B, J, H, W) heatmaps predichos.
+        target_heatmaps: (B, J, H, W) heatmaps ground-truth.
+        threshold:       fracción del tamaño del heatmap usada como radio.
+
+    Returns:
+        PCK en [0, 1].
+    """
+    B, J, H, W = pred_heatmaps.shape
+
+    pred_flat   = pred_heatmaps.detach().view(B, J, -1).argmax(dim=-1)
+    target_flat = target_heatmaps.detach().view(B, J, -1).argmax(dim=-1)
+
+    pred_y   = (pred_flat   // W).float()
+    pred_x   = (pred_flat   %  W).float()
+    target_y = (target_flat // W).float()
+    target_x = (target_flat %  W).float()
+
+    dist    = torch.sqrt((pred_x - target_x) ** 2 + (pred_y - target_y) ** 2)
+    thresh  = threshold * (H * W) ** 0.5
+    correct = (dist < thresh).float()
+
+    return correct.mean().item()
+
+
 # ---------------------------------------------------------------------------
 # Loss: CombinedLossFn
 # ---------------------------------------------------------------------------
@@ -652,6 +696,7 @@ class CombinedLossFn:
         
         self.current_target_heatmaps = None
         self.current_timesteps = None
+        self.last_pck = 0.0  # PCK del último forward
         
         # Pesos para weighted MSE
         self.keypoint_weights = torch.tensor([
@@ -743,7 +788,10 @@ class CombinedLossFn:
                         target_hm,
                         reduction="mean"
                     )
-                
+
+                # Accuracy: PCK sobre los heatmaps
+                self.last_pck = compute_pck(pred_heatmaps, target_hm)
+
             except Exception as e:
                 logger.warning(f"[LOSS step {self.step_counter}] Error en heatmap loss: {e}")
                 import traceback
@@ -761,6 +809,7 @@ class CombinedLossFn:
                 f"[LOSS step {self.step_counter}] "
                 f"Velocity: {velocity_loss_val.item():.6f}, "
                 f"Heatmap: {heatmap_loss_val.item():.6f}, "
+                f"PCK: {self.last_pck:.4f}, "
                 f"Total: {total_loss.item():.6f} "
                 f"(α={self.velocity_weight:.2f}, β={self.heatmap_weight:.2f})"
             )
@@ -782,25 +831,17 @@ def validate(
     device: torch.device,
     rank: int,
     dtype: torch.dtype = torch.bfloat16,
-) -> float:
+) -> Tuple[float, float]:
     """
-    NUEVO V2: Calcula validation loss.
-    
-    Args:
-        model_split: Modelo distribuido
-        val_dataloader: DataLoader de validación
-        loss_fn: Función de loss (solo en Rank 1)
-        diff_scheduler: Scheduler de difusión
-        device: Device actual
-        rank: Rank del proceso
-        dtype: Dtype de trabajo
-    
+    NUEVO V2: Calcula validation loss y PCK.
+
     Returns:
-        val_loss promedio (solo válido en Rank 0 después de broadcast)
+        (val_loss, val_pck) — ambos válidos en todos los ranks tras broadcast.
     """
     model_split.eval()
     
     total_loss = 0.0
+    total_pck  = 0.0
     num_batches = 0
     
     # Usar la misma semilla para reproducibilidad en validación
@@ -872,21 +913,27 @@ def validate(
             batch_loss = loss_fn(v_pred, combined_target)
             
             total_loss += batch_loss.item()
+            if isinstance(loss_fn, CombinedLossFn):
+                total_pck += loss_fn.last_pck
             num_batches += 1
     
-    # Calcular loss promedio
+    # Calcular promedios
     if rank == 1 and num_batches > 0:
         avg_loss = total_loss / num_batches
+        avg_pck  = total_pck  / num_batches
     else:
         avg_loss = 0.0
+        avg_pck  = 0.0
     
-    # Sincronizar val_loss entre ranks
+    # Sincronizar entre ranks
     loss_tensor = torch.tensor(avg_loss, device=device, dtype=torch.float32)
+    pck_tensor  = torch.tensor(avg_pck,  device=device, dtype=torch.float32)
     dist.broadcast(loss_tensor, src=1)
+    dist.broadcast(pck_tensor,  src=1)
     
     model_split.train()
     
-    return loss_tensor.item()
+    return loss_tensor.item(), pck_tensor.item()
 
 
 # ---------------------------------------------------------------------------
@@ -1553,7 +1600,7 @@ def main():
         with open(csv_file_path, mode=csv_mode, newline="") as f:
             writer = csv.writer(f)
             if csv_mode == "w":
-                writer.writerow(["epoch", "train_loss", "val_loss"])
+                writer.writerow(["epoch", "train_loss", "val_loss", "train_pck", "val_pck"])
 
     for epoch in range(start_epoch, config.epochs):
         if rank == 0:
@@ -1562,6 +1609,7 @@ def main():
         # TRAINING
         iterator = tqdm(train_dataloader, desc=f"Epoch {epoch}") if rank == 0 else train_dataloader
         avg_loss = 0.0
+        avg_pck  = 0.0
         steps = 0
 
         for step, batch in enumerate(iterator):
@@ -1619,10 +1667,12 @@ def main():
                     step_loss = torch.mean(torch.stack(losses)).item()
                     avg_loss += step_loss
                     steps += 1
+                    if isinstance(loss_fn_train, CombinedLossFn):
+                        avg_pck += loss_fn_train.last_pck
 
         # NUEVO V2: VALIDATION al final de cada época
         logger.info(f"Rank {rank}: Ejecutando validación...")
-        val_loss = validate(
+        val_loss, val_pck = validate(
             model_split=model_split,
             val_dataloader=val_dataloader,
             loss_fn=loss_fn_train,
@@ -1638,16 +1688,24 @@ def main():
         dist.broadcast(loss_tensor, src=1)
         global_avg_loss = loss_tensor.item()
 
+        # Sincronizar train_pck
+        epoch_pck_val = (avg_pck / steps) if (rank == 1 and steps > 0) else 0.0
+        pck_tensor = torch.tensor(epoch_pck_val, device=device, dtype=torch.float32)
+        dist.broadcast(pck_tensor, src=1)
+        global_avg_pck = pck_tensor.item()
+
         if rank == 0:
             logger.info(
-                f"Epoch {epoch} | Train Loss: {global_avg_loss:.6f} | "
-                f"Val Loss: {val_loss:.6f} | Mejor histórica: {best_loss:.6f}"
+                f"Epoch {epoch} | "
+                f"Train Loss: {global_avg_loss:.6f} | Val Loss: {val_loss:.6f} | "
+                f"Train PCK: {global_avg_pck:.4f} | Val PCK: {val_pck:.4f} | "
+                f"Mejor histórica: {best_loss:.6f}"
             )
             
-            # NUEVO V3: Escribir train_loss Y val_loss en CSV
+            # NUEVO V3: Escribir train_loss, val_loss, train_pck y val_pck en CSV
             with open(csv_file_path, mode="a", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch, global_avg_loss, val_loss])
+                writer.writerow([epoch, global_avg_loss, val_loss, global_avg_pck, val_pck])
 
         # Checkpoint (usar val_loss en lugar de train_loss)
         if val_loss < best_loss:  # MODIFICADO V3: usar val_loss

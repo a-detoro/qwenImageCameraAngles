@@ -13,17 +13,42 @@ Descripción:
         17-22 : manos (MediaPipe landmarks 17-22)
         23-26 : pies  (MediaPipe landmarks 29, 30, 31, 32)
 
-Ejecución:
+Ejecución (nuevo entrenamiento):
 python finetuning_hrnet_hands_feet.py
  --imgs-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/images
  --heatmaps-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/heatmaps/
  --model-path /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/models/pose_hrnet_w48_384x288.pth
  --output-model /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/3/hr_net_27kp_best.pth
  --output-stats /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/3/training_stats.csv
- --epochs 100 --lr-backbone 1e-5 --lr-head 1e-3
- --alpha-hands 3.0 --alpha-feet 3.0
- --early-stopping 15 --freeze-until stage4 --augment --num-brightness-augs 1
- --gpus 1 --batch-size 128 --data-subset 1.0
+ --epochs 100 --lr-backbone 1e-5 --lr-head 5e-3
+ --alpha-hands 4.0 --alpha-feet 4.0
+ --early-stopping 15 --freeze-until stage3 --augment --num-brightness-augs 1
+ --gpus 0 --batch-size 128 --data-subset 1.0
+
+Ejecución (reanudar desde checkpoint con datos sintéticos):
+python finetuning_hrnet_hands_feet.py
+ --imgs-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/images
+ --heatmaps-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/heatmaps/
+ --resume /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/full/hr_net_27kp_best.pth   
+ --synthetic-imgs-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands_synth/images
+ --synthetic-heatmaps-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands_synth/heatmaps
+ --synthetic-subset 0.5
+ --output-model /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/full/hr_net_27kp_best_w_synth.pth
+ --output-stats /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/full/training_stats_synth.csv
+ --epochs 100 --lr-backbone 1e-5 --lr-head 5e-3
+ --alpha-hands 4.0 --alpha-feet 4.0
+ --early-stopping 15 --freeze-until stage3 --augment --num-brightness-augs 1
+ --gpus 0 --batch-size 128
+
+Notas sobre --resume:
+  - Carga state_dict del checkpoint (pesos de 27kp ya entrenados).
+  - El optimizer NO se restaura (se reinicia con los LR indicados por CLI),
+    lo que es deseable al cambiar distribución de datos o LR.
+  - El best_val_loss se inicializa al val_loss guardado en el checkpoint,
+    de modo que sólo se guarda un nuevo best si se supera el anterior.
+  - Los outputs (modelo, stats, visualizaciones) van a --output-model /
+    --output-stats, que deben ser rutas DISTINTAS al checkpoint de entrada
+    para no sobreescribirlo.
 """
 
 import os
@@ -38,7 +63,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split, Subset
+from torch.utils.data import Dataset, DataLoader, random_split, Subset, ConcatDataset
 from tqdm import tqdm
 from dotenv import load_dotenv
 import urllib.request
@@ -163,12 +188,13 @@ def send_telegram_with_images(
 # ══════════════════════════════════════════════════════════════════════════════
 class NoiseHeatmapDataset(Dataset):
     def __init__(self, imgs_dir: str, heatmaps_dir: str, input_size=(288, 384),
-                 augment=True, num_brightness_augs=2):
+                 augment=True, num_brightness_augs=2, skip_validation=False):
         self.imgs_dir = Path(imgs_dir)
         self.heatmaps_dir = Path(heatmaps_dir)
         self.input_size = input_size
         self.augment = augment
         self.num_brightness_augs = num_brightness_augs
+        self.skip_validation = skip_validation
 
         valid_extensions = {'.jpg', '.jpeg', '.png'}
         all_img_paths = [p for p in self.imgs_dir.rglob('*') if p.suffix.lower() in valid_extensions]
@@ -193,6 +219,11 @@ class NoiseHeatmapDataset(Dataset):
             self.samples_per_img = 1
 
     def _validate_pairs(self):
+
+        if self.skip_validation:
+            logger.info("  Validación de pares omitida (--skip-validation)")
+            return list(range(len(self.img_paths))), len(self.img_paths)
+        
         valid_indices = []
         n_total = len(self.img_paths)
         for i, img_path in enumerate(tqdm(self.img_paths, desc="Validando pares", leave=False)):
@@ -316,6 +347,130 @@ def subsample_dataset(dataset, fraction, seed=42):
     return Subset(dataset, indices)
 
 
+def build_split_datasets(imgs_dir, heatmaps_dir, val_split, seed, augment,
+                         num_brightness_augs, data_subset,
+                         synthetic_imgs_dir=None, synthetic_heatmaps_dir=None,
+                         synthetic_subset=None, skip_validation=False):
+    """
+    Construye train/val/test aplicando el split *antes* de concatenar reales y sintéticos,
+    de modo que el split de los datos reales no cambia al añadir/quitar sintéticos.
+
+    Retorna:
+        train_dataset, val_dataset, test_dataset,
+        n_train_real, n_val_real,
+        n_train_synth, n_val_synth  (0 si no hay sintéticos)
+    """
+    # ── Datos reales ──
+    logger.info("Cargando dataset real train_val...")
+    real_trainval = NoiseHeatmapDataset(
+        imgs_dir=str(imgs_dir / 'train_val'),
+        heatmaps_dir=str(heatmaps_dir / 'train_val'),
+        input_size=(288, 384),
+        augment=augment,
+        num_brightness_augs=num_brightness_augs,
+        skip_validation=skip_validation
+    )
+    logger.info(
+        f"Real train_val: {real_trainval._n_valid}/{real_trainval._n_total_original} pares válidos "
+        f"({100*real_trainval._n_valid/real_trainval._n_total_original:.1f}%)"
+    )
+    if data_subset is not None:
+        real_trainval = subsample_dataset(real_trainval, data_subset, seed=seed)
+        logger.info(f"Real train_val tras subsampling: {len(real_trainval)} samples")
+
+    n_val_real  = int(val_split * len(real_trainval))
+    n_train_real = len(real_trainval) - n_val_real
+    train_real, val_real = random_split(
+        real_trainval, [n_train_real, n_val_real],
+        generator=torch.Generator().manual_seed(seed)
+    )
+
+    logger.info("Cargando dataset real test...")
+    real_test = NoiseHeatmapDataset(
+        imgs_dir=str(imgs_dir / 'test'),
+        heatmaps_dir=str(heatmaps_dir / 'test'),
+        input_size=(288, 384),
+        augment=False,
+        skip_validation=skip_validation
+    )
+    logger.info(
+        f"Real test: {real_test._n_valid}/{real_test._n_total_original} pares válidos "
+        f"({100*real_test._n_valid/real_test._n_total_original:.1f}%)"
+    )
+    test_real = subsample_dataset(real_test, data_subset, seed=seed) \
+        if data_subset is not None else real_test
+
+    n_train_synth = 0
+    n_val_synth   = 0
+
+    if synthetic_imgs_dir is not None and synthetic_heatmaps_dir is not None:
+        synth_imgs_dir     = Path(synthetic_imgs_dir)
+        synth_heatmaps_dir = Path(synthetic_heatmaps_dir)
+
+        # ── Datos sintéticos train_val ──
+        logger.info("Cargando dataset sintético train_val...")
+        synth_trainval = NoiseHeatmapDataset(
+            imgs_dir=str(synth_imgs_dir / 'train_val'),
+            heatmaps_dir=str(synth_heatmaps_dir / 'train_val'),
+            input_size=(288, 384),
+            augment=augment,
+            num_brightness_augs=num_brightness_augs,
+            skip_validation=skip_validation
+        )
+        logger.info(
+            f"Sintético train_val: {synth_trainval._n_valid}/{synth_trainval._n_total_original} pares válidos "
+            f"({100*synth_trainval._n_valid/synth_trainval._n_total_original:.1f}%)"
+        )
+        if synthetic_subset is not None:
+            synth_trainval = subsample_dataset(synth_trainval, synthetic_subset, seed=seed)
+            logger.info(f"Sintético train_val tras subsampling: {len(synth_trainval)} samples")
+
+        n_val_synth   = int(val_split * len(synth_trainval))
+        n_train_synth = len(synth_trainval) - n_val_synth
+        train_synth, val_synth = random_split(
+            synth_trainval, [n_train_synth, n_val_synth],
+            generator=torch.Generator().manual_seed(seed)
+        )
+
+        # ── Datos sintéticos test (opcional: puede estar vacío o no existir) ──
+        try:
+            synth_test = NoiseHeatmapDataset(
+                imgs_dir=str(synth_imgs_dir / 'test'),
+                heatmaps_dir=str(synth_heatmaps_dir / 'test'),
+                input_size=(288, 384),
+                augment=False,
+                skip_validation=skip_validation
+            )
+            test_synth = subsample_dataset(synth_test, synthetic_subset, seed=seed) \
+                if synthetic_subset is not None else synth_test
+            test_dataset = ConcatDataset([test_real, test_synth])
+            logger.info(
+                f"Sintético test: {synth_test._n_valid}/{synth_test._n_total_original} pares válidos "
+                f"({100*synth_test._n_valid/synth_test._n_total_original:.1f}%)"
+            )
+        except ValueError:
+            logger.info("Test sintético vacío o inexistente, usando solo test real.")
+            test_dataset = test_real
+
+        # Concatenar train y val después del split → el split real no cambia
+        train_dataset = ConcatDataset([train_real, train_synth])
+        val_dataset   = ConcatDataset([val_real,   val_synth])
+
+        logger.info(
+            f"Train combinado: {len(train_dataset)} ({n_train_real} real + {n_train_synth} sintético) | "
+            f"Val combinado: {len(val_dataset)} ({n_val_real} real + {n_val_synth} sintético) | "
+            f"Test combinado: {len(test_dataset)}"
+        )
+    else:
+        train_dataset = train_real
+        val_dataset   = val_real
+        test_dataset  = test_real
+        logger.info(f"Train: {n_train_real} | Val: {n_val_real} | Test: {len(test_dataset)}")
+
+    return (train_dataset, val_dataset, test_dataset,
+            n_train_real, n_val_real, n_train_synth, n_val_synth)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MODELO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -357,6 +512,33 @@ def load_pretrained_and_extend(model, weights_path, device, num_old_joints=17, n
     model.load_state_dict(state_dict_new, strict=True)
     logger.info("Pesos cargados y extendidos correctamente")
     return model
+
+
+def load_resume_checkpoint(model, resume_path, device):
+    """
+    Carga un checkpoint de 27kp ya entrenado para continuar el entrenamiento.
+    Retorna el val_loss guardado para inicializar best_val_loss.
+    El optimizer NO se restaura (se reinicia).
+    """
+    logger.info(f"Reanudando desde checkpoint: {resume_path}")
+    try:
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(resume_path, map_location=device)
+
+    state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
+    model.load_state_dict(state_dict, strict=True)
+
+    resumed_val_loss = checkpoint.get('val_loss', float('inf'))
+    resumed_epoch    = checkpoint.get('epoch', '?')
+    resumed_pck      = checkpoint.get('val_pck', None)
+
+    logger.info(
+        f"  Checkpoint cargado: época={resumed_epoch}, "
+        f"val_loss={resumed_val_loss:.6f}"
+        + (f", val_pck={resumed_pck:.2f}%" if resumed_pck is not None else "")
+    )
+    return model, resumed_val_loss
 
 
 def freeze_backbone_partial(model, freeze_until='stage4'):
@@ -546,6 +728,10 @@ def save_epoch_visualizations(images, output_dir, epoch):
     collage = make_collage(images, cols=5)
     collage_path = epoch_dir / "collage.png"
     cv2.imwrite(str(collage_path), cv2.cvtColor(collage, cv2.COLOR_RGB2BGR))
+
+    # También guarda el checkpoint de esta época (best hasta el momento) en la carpeta de visualización.
+    # El checkpoint real ya se guarda en output_path; este es una copia con nombre de época
+    # para facilitar la comparación posterior entre runs.
     return collage, collage_path
 
 
@@ -556,8 +742,24 @@ def main():
     parser = argparse.ArgumentParser(description='Fine-Tuning HRNet: 17→27 keypoints')
     parser.add_argument('--imgs-dir',        type=str, required=True)
     parser.add_argument('--heatmaps-dir',    type=str, required=True)
+    # Checkpoint de partida: pesos HRNet originales de 17kp (se extienden a 27kp)
     parser.add_argument('--model-path',      type=str, default='./models/pose_hrnet_w48_384x288.pth')
-    parser.add_argument('--output-model',    type=str, default='./models/hrnet_27kp_best.pth')
+    # Checkpoint de reanudación: pesos ya entrenados en 27kp (no se extienden, se cargan tal cual)
+    parser.add_argument('--resume',          type=str, default=None,
+                        help='Checkpoint .pth de 27kp para reanudar entrenamiento. '
+                             'Tiene prioridad sobre --model-path. '
+                             'El optimizer se reinicia. '
+                             'best_val_loss se inicializa al val_loss del checkpoint.')
+    # Datos sintéticos (opcionales). Estructura esperada igual que los reales: train_val/ y test/
+    parser.add_argument('--synthetic-imgs-dir',     type=str, default=None,
+                        help='Directorio raíz de imágenes sintéticas (con subcarpetas train_val/ y test/)')
+    parser.add_argument('--synthetic-heatmaps-dir', type=str, default=None,
+                        help='Directorio raíz de heatmaps sintéticos (con subcarpetas train_val/ y test/)')
+    parser.add_argument('--synthetic-subset',       type=float, default=None,
+                        help='Fracción de datos sintéticos a usar (0.0-1.0). None = todos.')
+    parser.add_argument('--output-model',    type=str, default='./models/hrnet_27kp_best.pth',
+                        help='Ruta del mejor checkpoint de esta ejecución. '
+                             'Debe ser distinta de --resume para no sobreescribirlo.')
     parser.add_argument('--output-stats',    type=str, default='./training_stats_27kp.csv')
     parser.add_argument('--epochs',          type=int,   default=100)
     parser.add_argument('--batch-size',      type=int,   default=12)
@@ -574,9 +776,22 @@ def main():
     parser.add_argument('--freeze-until',    type=str, default='stage3',
                         choices=['none', 'stage2', 'stage3', 'stage4'])
     parser.add_argument('--augment',         action='store_true')
-    parser.add_argument('--num-brightness-augs', type=int, default=2)
-    parser.add_argument('--data-subset',     type=float, default=None)
+    parser.add_argument('--num-brightness-augs', type=int, default=1)
+    parser.add_argument('--data-subset',     type=float, default=1.0)
+    parser.add_argument('--skip-validation', action='store_true',
+                    help='Salta la validación de pares imagen-heatmap. '
+                         'Úsalo si ya has validado el dataset previamente.')
+    parser.add_argument('--reset-best-loss', action='store_true',
+                    help='Ignora el val_loss del checkpoint y empieza best_val_loss desde inf. '
+                         'Úsalo al cambiar la distribución del dataset (e.g. añadir sintéticos).')
     args = parser.parse_args()
+
+    # Validación: output-model no debe coincidir con resume para no sobreescribirlo
+    if args.resume and Path(args.resume).resolve() == Path(args.output_model).resolve():
+        raise ValueError(
+            "--output-model y --resume apuntan al mismo fichero. "
+            "Usa una ruta distinta para --output-model para no sobreescribir el checkpoint de entrada."
+        )
 
     load_dotenv()
     telegram_token   = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -600,44 +815,25 @@ def main():
     logger.info(f"Device: {device}")
 
     # ── Datasets ──
-    logger.info("Cargando dataset train_val...")
-    full_trainval = NoiseHeatmapDataset(
-        imgs_dir=str(imgs_dir / 'train_val'),
-        heatmaps_dir=str(heatmaps_dir / 'train_val'),
-        input_size=(288, 384),
+    # El split de reales se hace antes de concatenar sintéticos,
+    # por lo que añadir/quitar sintéticos no altera el split de los datos reales.
+    (train_dataset, val_dataset, test_dataset,
+     n_train_real, n_val_real,
+     n_train_synth, n_val_synth) = build_split_datasets(
+        imgs_dir=imgs_dir,
+        heatmaps_dir=heatmaps_dir,
+        val_split=args.val_split,
+        seed=args.seed,
         augment=args.augment,
         num_brightness_augs=args.num_brightness_augs,
+        data_subset=args.data_subset,
+        synthetic_imgs_dir=args.synthetic_imgs_dir,
+        synthetic_heatmaps_dir=args.synthetic_heatmaps_dir,
+        synthetic_subset=args.synthetic_subset,
+        skip_validation=args.skip_validation,
     )
-    logger.info(
-        f"Train_val: {full_trainval._n_valid}/{full_trainval._n_total_original} pares válidos "
-        f"({100*full_trainval._n_valid/full_trainval._n_total_original:.1f}%)"
-    )
-
-    if args.data_subset is not None:
-        full_trainval = subsample_dataset(full_trainval, args.data_subset, seed=args.seed)
-        logger.info(f"Train_val tras subsampling: {len(full_trainval)} samples")
-
-    n_total = len(full_trainval)
-    n_val   = int(args.val_split * n_total)
-    n_train = n_total - n_val
-    generator = torch.Generator().manual_seed(args.seed)
-    train_dataset, val_dataset = random_split(full_trainval, [n_train, n_val], generator=generator)
-    logger.info(f"Train: {n_train} | Val: {n_val}")
-
-    logger.info("Cargando dataset test...")
-    full_test = NoiseHeatmapDataset(
-        imgs_dir=str(imgs_dir / 'test'),
-        heatmaps_dir=str(heatmaps_dir / 'test'),
-        input_size=(288, 384),
-        augment=False,
-    )
-    logger.info(
-        f"Test: {full_test._n_valid}/{full_test._n_total_original} pares válidos "
-        f"({100*full_test._n_valid/full_test._n_total_original:.1f}%)"
-    )
-    test_dataset = subsample_dataset(full_test, args.data_subset, seed=args.seed) \
-        if args.data_subset is not None else full_test
-    logger.info(f"Test: {len(test_dataset)}")
+    n_train = len(train_dataset)
+    n_val   = len(val_dataset)
 
     num_workers = 10
     loader_kwargs = dict(num_workers=num_workers, pin_memory=True,
@@ -650,7 +846,21 @@ def main():
     logger.info(f"Inicializando modelo con {N_TOTAL} keypoints...")
     model = PoseHRNet(width=48, num_joints=N_TOTAL)
 
-    if Path(args.model_path).exists():
+    # best_val_loss: si reanudamos, se inicializa al val_loss del checkpoint
+    # para que sólo se guarde un nuevo best si lo superamos.
+    best_val_loss = float('inf')
+
+    if args.resume and Path(args.resume).exists():
+        # Reanudar desde checkpoint de 27kp ya entrenado
+        model, resumed_val_loss = load_resume_checkpoint(model, args.resume, device)
+        if args.reset_best_loss:
+            best_val_loss = float('inf')
+            logger.info("best_val_loss reiniciado a inf (--reset-best-loss)")
+        else:
+            best_val_loss = resumed_val_loss
+            logger.info(f"best_val_loss inicializado a {best_val_loss:.6f} (del checkpoint reanudado)")
+    elif Path(args.model_path).exists():
+        # Partir de pesos HRNet originales de 17kp, extender a 27kp
         model = load_pretrained_and_extend(
             model, args.model_path, device, num_old_joints=17, num_new_joints=N_TOTAL
         )
@@ -664,6 +874,8 @@ def main():
         model = nn.DataParallel(model, device_ids=args.gpus)
 
     # ── Optimizer ──
+    # Siempre se reinicia (no se restaura del checkpoint), incluso al reanudar.
+    # Esto es deseable al cambiar distribución de datos o ajustar LR entre runs.
     criterion  = nn.MSELoss()
     raw_model  = model.module if isinstance(model, nn.DataParallel) else model
     stage4_params = [p for n, p in raw_model.named_parameters() if p.requires_grad and 'stage4' in n]
@@ -674,24 +886,34 @@ def main():
     ])
     logger.info(f"Optimizer: stage4 LR={args.lr_backbone}, head LR={args.lr_head}")
 
-    # ── Tracking ──
-    stats          = []
-    best_val_loss  = float('inf')
-    patience_counter = 0
-    output_path    = Path(args.output_model)
+    # ── Rutas de output ──
+    output_path = Path(args.output_model)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path = Path(args.output_stats)
     stats_path.parent.mkdir(parents=True, exist_ok=True)
+    # Directorio de visualizaciones: misma carpeta que el output model
+    vis_base_dir = output_path.parent / "visualizations"
+
+    # ── Tracking ──
+    stats            = []
+    patience_counter = 0
     context_str = f"BS={args.batch_size} LR={args.lr_head} α_hands={args.alpha_hands} α_feet={args.alpha_feet}\n"
 
     if use_telegram:
-        subset_info = f"Subset: {args.data_subset*100:.1f}%\n" if args.data_subset else ""
+        resume_info = f"Reanudando desde: {Path(args.resume).name}\n" if args.resume else ""
+        synth_info  = (
+            f"Sintéticos: {n_train_synth} train + {n_val_synth} val\n"
+            if n_train_synth > 0 else ""
+        )
         send_telegram(
             f"🚀 <b>Inicio Fine-Tuning HRNet 27kp</b>\n"
             f"──────────────────────\n"
+            f"{resume_info}"
             f"GPUs: {args.gpus}\n"
-            f"Train: {n_train} | Val: {n_val} | Test: {len(test_dataset)}\n"
-            f"{subset_info}"
+            f"Train: {n_train} ({n_train_real} real + {n_train_synth} sint.) | "
+            f"Val: {n_val} ({n_val_real} real + {n_val_synth} sint.) | "
+            f"Test: {len(test_dataset)}\n"
+            f"{synth_info}"
             f"──────────────────────\n"
             f"<b>Hyperparams:</b>\n"
             f"• Batch size: {args.batch_size}\n"
@@ -702,7 +924,8 @@ def main():
             f"• Alpha feet: {args.alpha_feet}\n"
             f"• Freeze until: {args.freeze_until}\n"
             f"• Augment: {args.augment} (brightness_augs={args.num_brightness_augs})\n"
-            f"• Early stopping: {args.early_stopping}",
+            f"• Early stopping: {args.early_stopping}\n"
+            f"• best_val_loss inicial: {best_val_loss:.6f}",
             token=telegram_token, chat_id=telegram_chat_id
         )
 
@@ -776,6 +999,8 @@ def main():
             patience_counter = 0
 
             raw_model_to_save = model.module if isinstance(model, nn.DataParallel) else model
+
+            # Checkpoint principal de esta ejecución (best de este run)
             torch.save({
                 'epoch': epoch + 1,
                 'state_dict': raw_model_to_save.state_dict(),
@@ -784,7 +1009,11 @@ def main():
                 'val_pck': val['pck'],
                 'num_joints': N_TOTAL,
             }, str(output_path))
-            logger.info(f"  → Mejor modelo guardado (val_loss={best_val_loss:.6f}, mejora={improvement:.6f})")
+            logger.info(f"  → Mejor modelo guardado en {output_path} (val_loss={best_val_loss:.6f}, mejora={improvement:.6f})")
+
+            # Además se guarda una copia con nombre de época en la carpeta de visualizaciones,
+            # para poder comparar checkpoints de distintas épocas a posteriori.
+            epoch_ckpt_path = vis_base_dir / f"epoch_{epoch+1:04d}" / f"ckpt_epoch{epoch+1:04d}_valloss{val['loss']:.6f}.pth"
 
             if use_telegram:
                 vis_images = visualize_predictions(
@@ -795,9 +1024,20 @@ def main():
                 )
                 collage, collage_path = save_epoch_visualizations(
                     vis_images,
-                    output_dir=Path(args.output_model).parent / "visualizations",
+                    output_dir=vis_base_dir,
                     epoch=epoch + 1,
                 )
+                # Guardar copia del checkpoint en la carpeta de época (ya existe por save_epoch_visualizations)
+                torch.save({
+                    'epoch': epoch + 1,
+                    'state_dict': raw_model_to_save.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'val_loss': val['loss'],
+                    'val_pck': val['pck'],
+                    'num_joints': N_TOTAL,
+                }, str(epoch_ckpt_path))
+                logger.info(f"  → Copia de checkpoint guardada en {epoch_ckpt_path}")
+
                 msg = (
                     f"🏆 <b>Nuevo mejor modelo</b>\n"
                     f"{context_str}"
@@ -808,6 +1048,19 @@ def main():
                     f"Época: {epoch + 1}"
                 )
                 send_telegram_with_images(msg, collage, token=telegram_token, chat_id=telegram_chat_id)
+            else:
+                # Sin telegram: igualmente crear carpeta de época y guardar checkpoint por época
+                epoch_dir = vis_base_dir / f"epoch_{epoch+1:04d}"
+                epoch_dir.mkdir(parents=True, exist_ok=True)
+                torch.save({
+                    'epoch': epoch + 1,
+                    'state_dict': raw_model_to_save.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'val_loss': val['loss'],
+                    'val_pck': val['pck'],
+                    'num_joints': N_TOTAL,
+                }, str(epoch_ckpt_path))
+                logger.info(f"  → Copia de checkpoint guardada en {epoch_ckpt_path}")
         else:
             patience_counter += 1
             logger.info(f"  → Sin mejora. Paciencia: {patience_counter}/{args.early_stopping}")

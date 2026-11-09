@@ -88,7 +88,9 @@ def synchronize_outputs_by_timestamp(output_root):
     Sincroniza vistas ignorando el prefijo de la cámara (00_15, 00_16, etc.)
     """
     logging.info("Iniciando sincronización por TIMESTAMP...")
-    subconjuntos = ['test', 'train_val']
+    # subconjuntos = ['test', 'train_val']
+    
+    subconjuntos = ['']  # Si ya están organizados por subconjunto, usar la línea anterior. Si no, usar esta para procesar todo en un solo paso.
     
     for sub in subconjuntos:
         sub_path = os.path.join(output_root, sub)

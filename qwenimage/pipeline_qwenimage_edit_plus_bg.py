@@ -541,6 +541,7 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        mask_blend_ratio: float = 0.7,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -622,6 +623,10 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int` defaults to 512): Maximum sequence length to use with the `prompt`.
+            mask_blend_ratio (`float`, *optional*, defaults to 0.7):
+                Ratio of inference steps where the mask and background are strictly applied. For example, 0.7 means
+                the mask is applied for 70% of the steps, and the remaining 30% lets the diffuser freely blend for 
+                a smoother, more coherent transition. Only used when `background_image` and `mask_image` are provided.
 
         Examples:
 
@@ -840,6 +845,10 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
+        
+        # Calculate up to which step to apply the mask (for smoother blending)
+        mask_apply_steps = int(num_inference_steps * mask_blend_ratio) if background_latents_tokens is not None else 0
+        
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -889,14 +898,12 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 latents_dtype = latents.dtype
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
-                # if mask_tokens is not None and background_latents_tokens is not None:
-                #     noise_bg = torch.randn_like(latents)
-                    # noisy_bg_latents = self.scheduler.add_noise(background_latents_tokens, noise_bg, t)  #Aquí es donde está fallando pq FlowMatchEulerDiscreteScheduler no tiene el método add_noise
-                    
                 # ----------------------------------------------------------------
-                # BLOQUE CORREGIDO: Mezcla Manual (Flow Matching puro)
+                # Background and Mask Blending with Gradual Release
+                # Apply strict mask only in the first portion of steps, then release
+                # for smoother, more coherent transitions
                 # ----------------------------------------------------------------
-                if background_latents_tokens is not None and mask_tokens is not None:
+                if background_latents_tokens is not None and mask_tokens is not None and i < mask_apply_steps:
                     # 1. Use the PACKED background latents
                     # Generate noise matching the packed shape
                     noise_bg = torch.randn_like(background_latents_tokens)
@@ -913,10 +920,14 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     # 3. Flow Matching blend on PACKED latents
                     noisy_bg_latents = (1 - sigma) * background_latents_tokens + sigma * noise_bg
                     
-                    # 4. Blend using packed masks
-                    latents = (latents * mask_tokens) + (noisy_bg_latents * (1 - mask_tokens))
+                    # 4. Optional: Gradual fade-out of mask influence as we approach mask_apply_steps
+                    # This creates an even smoother transition
+                    fade_factor = 1.0 - (i / mask_apply_steps) * 0.3  # Reduce mask strength by up to 30% gradually
+                    
+                    # 5. Blend using packed masks with fade factor
+                    effective_mask = mask_tokens * fade_factor
+                    latents = (latents * effective_mask) + (noisy_bg_latents * (1 - effective_mask))
                 # ----------------------------------------------------------------
-                    # latents = latents * mask_tokens + noisy_bg_latents * (1 - mask_tokens)
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():

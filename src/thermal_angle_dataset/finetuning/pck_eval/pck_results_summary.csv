@@ -1,0 +1,13 @@
+experiment,epoch,split,pck_mean,pck_median,pck_std,n_pck_ok,mse_mean,ssim_mean,n_total
+ablation_no_heatmap,4,test,13.73,5.88,17.86,6,1091.813,0.8018,6
+ablation_no_heatmap,4,val,10.08,5.88,18.92,28,1054.389,0.8191,28
+ablation_no_heatmap,9,test,58.82,61.76,18.29,6,512.217,0.8768,6
+ablation_no_heatmap,9,val,40.13,32.35,33.35,28,438.737,0.8927,28
+ablation_no_heatmap,14,test,65.69,64.71,16.08,6,462.335,0.8848,6
+ablation_no_heatmap,14,val,46.85,38.24,35.69,28,406.135,0.894,28
+final_focus_scale2_336,4,test,34.31,38.24,17.12,6,732.722,0.8505,6
+final_focus_scale2_336,9,test,42.16,47.06,14.57,6,700.362,0.8534,6
+final_focus_scale2_336,14,test,48.04,55.88,25.28,6,480.282,0.8751,6
+final_focus_scale2_expanded,4,test,27.45,29.41,22.95,6,761.653,0.8627,6
+final_focus_scale2_expanded,9,test,60.78,61.76,23.93,6,378.937,0.8887,6
+final_focus_scale2_expanded,14,test,81.37,82.35,11.97,6,383.364,0.8847,6

@@ -374,7 +374,8 @@ class HRNetInferencer:
         model_type: str = 'hrnet_w48_coco',
         device: Optional[str] = None,
         download: bool = True,
-        use_backup: bool = True
+        use_backup: bool = True,
+        num_joints: Optional[int] = None
     ):
         """
         Inicializar inferidor de HRNet.
@@ -385,6 +386,7 @@ class HRNetInferencer:
             device: 'cuda' o 'cpu' (auto si None)
             download: Descargar pesos si no existen
             use_backup: Usar URL backup si falla
+            num_joints: Número de puntos de referencia (si None, se usa el valor predeterminado)
         """
         self.model_type = model_type
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -394,6 +396,9 @@ class HRNetInferencer:
             raise ValueError(f"Tipo de modelo desconocido: {model_type}")
         
         self.config = self.CONFIGS[model_type]
+        if num_joints is not None:
+            self.config = dict(self.config)  # copia para no mutar el dict de clase
+            self.config['keypoints'] = num_joints
         self.model_path = model_path
         
         self._ensure_model_exists(download)

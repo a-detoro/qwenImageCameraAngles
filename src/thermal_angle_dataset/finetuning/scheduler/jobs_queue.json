@@ -1,0 +1,155 @@
+{
+  "jobs": [
+    {
+      "id": "with_heatmap_ablation",
+      "command": "bash run_ablation_with_heatmap.sh {gpu}",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 20000,
+      "enabled": false,
+      "priority": 99,
+      "_note": "Desactivado: la loss con HRNet reconstruye x0 en un solo paso desde el latente ruidoso, poco fiable sobre todo a t alto y en epocas tempranas de un dominio nuevo (termico); ademas el HRNet esta entrenado en RGB. loss_vel_focus evita el problema de raiz al no reconstruir nada."
+    },
+    {
+      "id": "focus_sweep",
+      "command": "bash run_focus_sweep.sh {gpu}",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": false,
+      "priority": 99,
+      "_note": "Sustituido por focus_scale_* individuales (uno por escala) para que el scheduler los reparta en paralelo entre GPUs en vez de correrlos secuencialmente en una sola. scale=0.5 ya completo sus 4 epocas antes de pararlo, no hace falta repetirlo."
+    },
+    {
+      "id": "focus_scale_2",
+      "command": "bash run_focus_single.sh {gpu} 2",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "id": "focus_scale_8",
+      "command": "bash run_focus_single.sh {gpu} 8",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "id": "focus_scale_32",
+      "command": "bash run_focus_single.sh {gpu} 32",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 2
+    },
+    {
+      "id": "focus_scale_64",
+      "command": "bash run_focus_single.sh {gpu} 64",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 2
+    },
+    {
+      "id": "focus_scale_1",
+      "command": "bash run_focus_single.sh {gpu} 1",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 3,
+      "_note": "Barrido fino alrededor del optimo encontrado (scale=2 gano el barrido log, 0.5/2/8 muy cercanos, 32 empieza a degradar, 64 diverge)."
+    },
+    {
+      "id": "focus_scale_1.5",
+      "command": "bash run_focus_single.sh {gpu} 1.5",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 3
+    },
+    {
+      "id": "focus_scale_3",
+      "command": "bash run_focus_single.sh {gpu} 3",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 4
+    },
+    {
+      "id": "focus_scale_5",
+      "command": "bash run_focus_single.sh {gpu} 5",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 4
+    },
+    {
+      "id": "final_focus_scale2_expanded",
+      "command": "bash run_final_focus.sh {gpu}",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0,
+      "_note": "Run final (no cribado): loss_vel_focus scale=2, curriculum ampliado 840 train / 224 val / 224 test (~2.5x el original 336/112), 15 epocas, patience=15. Experimento complementario (mas datos + mejor loss), NO es la comparacion controlada."
+    },
+    {
+      "id": "final_focus_scale2_336",
+      "command": "bash run_final_focus_336.sh {gpu}",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0,
+      "_note": "LA comparacion controlada: mismo curriculum 336/112 y mismo batch efectivo que with_heatmap/no_heatmap_ablation, solo cambia la loss (loss_vel_focus scale=2 vs velocity pura). Esta es la que demuestra (o no) que la loss de pose ayuda."
+    },
+    {
+      "id": "scale_sweep_full_0.5",
+      "command": "bash run_scale_sweep_full.sh {gpu} 0.5",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0,
+      "_note": "Barrido definitivo (curriculum completo 336/112, 15 epocas, inference_every=3, inference_samples=todo el test set) para decidir con certeza si loss_vel_focus funciona a alguna escala, tras ver que scale=2 gana PCK al principio pero pierde al final frente a no_heatmap."
+    },
+    {
+      "id": "scale_sweep_full_1",
+      "command": "bash run_scale_sweep_full.sh {gpu} 1",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0
+    },
+    {
+      "id": "scale_sweep_full_5",
+      "command": "bash run_scale_sweep_full.sh {gpu} 5",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0
+    },
+    {
+      "id": "ablation_random_curriculum",
+      "command": "bash run_ablation_random_curriculum.sh {gpu}",
+      "cwd": "/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/thermal_angle_dataset/finetuning",
+      "preferred_gpus": [2],
+      "min_free_mem_mib": 18000,
+      "enabled": true,
+      "priority": 0,
+      "_note": "Comparacion controlada para el curriculum por rareza de pose: misma config exacta que ablation_no_heatmap (velocity loss pura, 336/112, mismo test set), pero train/val elegidos uniformemente al azar (build_random_curriculum.py) en vez de por rareza (knn_score). Si los resultados son parecidos a ablation_no_heatmap -> el curriculum por rareza no aporta frente a random de igual tamanio."
+    }
+  ]
+}

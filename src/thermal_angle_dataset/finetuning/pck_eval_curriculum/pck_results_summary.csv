@@ -1,0 +1,17 @@
+experiment,epoch,split,pck_mean,pck_median,pck_std,n_pck_ok,mse_mean,ssim_mean,n_total
+ablation_no_heatmap,4,test,13.73,5.88,17.86,6,1091.813,0.8018,6
+ablation_no_heatmap,4,val,10.08,5.88,18.92,28,1054.389,0.8191,28
+ablation_no_heatmap,9,test,58.82,61.76,18.29,6,512.217,0.8768,6
+ablation_no_heatmap,9,val,40.13,32.35,33.35,28,438.737,0.8927,28
+ablation_no_heatmap,14,test,65.69,64.71,16.08,6,462.335,0.8848,6
+ablation_no_heatmap,14,val,46.85,38.24,35.69,28,406.135,0.894,28
+ablation_random_curriculum,2,test,35.43,29.41,27.9,672,587.865,0.8595,672
+ablation_random_curriculum,2,val,36.76,38.24,26.85,28,536.359,0.8675,28
+ablation_random_curriculum,5,test,60.01,64.71,33.13,672,472.928,0.8784,672
+ablation_random_curriculum,5,val,53.78,55.88,33.3,28,423.12,0.8862,28
+ablation_random_curriculum,8,test,63.07,76.47,33.48,672,417.682,0.8892,672
+ablation_random_curriculum,8,val,53.99,50.0,34.48,28,376.606,0.8954,28
+ablation_random_curriculum,11,test,67.66,82.35,32.83,672,369.795,0.8959,672
+ablation_random_curriculum,11,val,71.01,82.35,30.36,28,259.324,0.9062,28
+ablation_random_curriculum,14,test,70.27,82.35,32.23,672,345.87,0.9,672
+ablation_random_curriculum,14,val,75.0,88.24,27.3,28,259.599,0.9083,28

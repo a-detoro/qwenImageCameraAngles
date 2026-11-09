@@ -42,6 +42,8 @@ from PIL import Image
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
+NUM_KEYPOINTS_HRNET = 27
+
 # Copiar la clase MultiViewDataset aquí para independencia
 class MultiViewDataset:
     """
@@ -219,7 +221,8 @@ def add_heatmaps_to_batches(
         model_path=hrnet_model_path,
         model_type=model_type,
         device=device,
-        download=False
+        download=False,
+        num_joints=27,   
     )
     
     # 3. Listar archivos .pt batch
@@ -289,11 +292,11 @@ def add_heatmaps_to_batches(
                         f"(batch {batch_idx}, muestra {sample_idx})"
                     )
                     # Usar heatmaps vacíos como placeholder
-                    batch_heatmaps.append(np.zeros((17, 72, 96), dtype=np.float32))
+                    batch_heatmaps.append(np.zeros((NUM_KEYPOINTS_HRNET, 72, 96), dtype=np.float32))
                     continue
                 
                 # Calcular heatmaps
-                heatmaps = inferencer.get_heatmaps(image)  # (17, H, W) numpy
+                heatmaps = inferencer.get_heatmaps(image)  # (27, H, W) numpy
                 batch_heatmaps.append(heatmaps)
             
             # Convertir lista a tensor
@@ -307,7 +310,7 @@ def add_heatmaps_to_batches(
             
             batch_heatmaps_tensor = torch.from_numpy(
                 np.stack(batch_heatmaps, axis=0)
-            ).float()  # (B, 17, H, W)
+            ).float()  # (B, 27, H, W)
             
             # Hacer backup del original si es necesario
             if backup_original:
@@ -386,10 +389,10 @@ def verify_heatmaps(
         shape = heatmaps.shape
         batch_size = data["target_latents_packed"].shape[0]
         
-        if len(shape) != 4 or shape[0] != batch_size or shape[1] != 17:
+        if len(shape) != 4 or shape[0] != batch_size or shape[1] != NUM_KEYPOINTS_HRNET:
             logger.error(
                 f"✗ {pt_file.name}: shape incorrecta {shape}, "
-                f"esperaba ({batch_size}, 17, H, W)"
+                f"esperaba ({batch_size}, {NUM_KEYPOINTS_HRNET}, H, W)"
             )
             continue
         

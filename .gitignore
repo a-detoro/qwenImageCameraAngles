@@ -1,9 +1,31 @@
 *.zip
 datos/MultiView*/
 datos/Output_CSV*/
+datos
 *.log
 imgs_random/
 analisis/
 .gradio/
 __pycache__/
 analisis/
+
+models
+output_*
+
+# pesos / binarios grandes (nunca subir, da igual donde aparezcan)
+*.pth
+*.pt
+*.safetensors
+*.bin
+*.ckpt
+*.onnx
+*.npz
+*.h5
+
+# notebooks checkpoints y cache
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# salidas generadas (visualizaciones/evaluaciones pesadas, no son codigo)
+**/pck_eval*/visualizations/
+src/thermal_angle_dataset/sanity_check/outputs/

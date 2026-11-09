@@ -106,9 +106,9 @@ def check_pt_files(latents_dir: str, split: str = "train", num_samples: int = 5)
                         f"expected {expected_batch_size}"
                     )
                 
-                if heatmaps.shape[1] != 17:
+                if heatmaps.shape[1] != 27:
                     logger.error(
-                        f"  ✗ Heatmaps tiene {heatmaps.shape[1]} keypoints, esperaba 17"
+                        f"  ✗ Heatmaps tiene {heatmaps.shape[1]} keypoints, esperaba 27"
                     )
                 
                 logger.info(

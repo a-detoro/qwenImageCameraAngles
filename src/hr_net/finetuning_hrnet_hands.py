@@ -10,13 +10,13 @@ Descripción:
 
 
 Ejecución:
-python finetuning_hrnet_hands.py --imgs-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/images
- --heatmaps-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/heatmaps/ 
- --model-path /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/models/pose_hrnet_w48_384x288.pth 
- --output-model /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/2/hr_net_23kp_best.pth  
- --output-stats /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/2/training_stats.csv --epochs 100
- --lr-backbone 1e-5 --lr-head 1e-3  --alpha 3.0 --early-stopping 15 --freeze-until stage4  --augment  --num-brightness-augs 1 
- --gpus 1  --batch-size 128 --data-subset 1.0
+python finetuning_hrnet_hands.py --imgs-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/images 
+--heatmaps-dir /nas/antoniodetoro/datasets/qwen/hr_net_with_hands/heatmaps/ 
+--model-path /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/models/pose_hrnet_w48_384x288.pth 
+--output-model /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/4/hr_net_23kp_best.pth 
+--output-stats /nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/4/training_stats.csv 
+--epochs 100 --lr-backbone 1e-5 --lr-head 5e-3  --alpha 4.0 --early-stopping 15 --freeze-until stage3  
+--augment  --num-brightness-augs 1 --gpus 0  --batch-size 128 --data-subset 1.0
 
 Características:
     - Carga pesos preentrenados (17 kp) y extiende a 23

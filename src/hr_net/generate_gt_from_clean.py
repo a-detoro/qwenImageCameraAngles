@@ -29,6 +29,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
+from turtle import right
 
 import cv2
 import numpy as np
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 def load_model(model_path: str, device: torch.device) -> PoseHRNet:
     """Cargar HRNet-W48 pre-entrenado."""
-    model = PoseHRNet(width=48, num_joints=17)
+    model = PoseHRNet(width=48, num_joints=27)
     try:
         sd = torch.load(model_path, map_location=device, weights_only=False)
     except TypeError:
@@ -73,16 +74,25 @@ def get_heatmaps(model, image: np.ndarray, device: torch.device,
     return output.squeeze(0).cpu().numpy()
 
 
-# Pares de articulaciones simétricas (índices COCO, base 0) para flip correcto
-FLIP_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
-
-
 def flip_heatmap(heatmap: np.ndarray) -> np.ndarray:
-    """Voltea un heatmap (C, H, W) horizontalmente e intercambia canales izq↔der."""
-    flipped = heatmap[:, :, ::-1].copy()
-    for left, right in FLIP_PAIRS:
-        flipped[left], flipped[right] = flipped[right].copy(), flipped[left].copy()
-    return flipped
+        """Flip horizontal del heatmap (27 canales)."""
+        flipped = np.flip(heatmap, axis=2).copy()
+
+        # Body: pares simétricos HRNet COCO
+        body_swap_pairs = [
+            (1, 2), (3, 4), (5, 6), (7, 8), (9, 10),
+            (11, 12), (13, 14), (15, 16),
+        ]
+        for left, right in body_swap_pairs:
+            flipped[[left, right]] = flipped[[right, left]]
+
+        # Manos (canales 17-22): [17,19,21] izq ↔ [18,20,22] der
+        flipped[[17, 19, 21, 18, 20, 22]] = flipped[[18, 20, 22, 17, 19, 21]]
+
+        # Pies (canales 23-26):
+        flipped[[23, 25, 24, 26]] = flipped[[24, 26, 23, 25]]
+
+        return flipped
 
 
 def main():
@@ -93,7 +103,8 @@ def main():
                         help='Carpeta de salida plana (imágenes + .npy juntos). '
                              'Ejecutar una vez por conjunto (train_val / test).')
     parser.add_argument('--model-path', type=str,
-                        default='./models/pose_hrnet_w48_384x288.pth',
+                        # default='./models/pose_hrnet_w48_384x288.pth',
+                        default='/nas/antoniodetoro/qwen/Qwen-Image-Edit-Angles-2/src/hr_net/outputs/full/hr_net_23kp_best.pth',  # es de 27 aunque se llame 23...
                         help='Modelo HRNet para generar heatmaps GT')
     args = parser.parse_args()
 
